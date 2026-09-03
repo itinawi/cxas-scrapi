@@ -1121,14 +1121,20 @@ def deployments_create(args: argparse.Namespace) -> None:
     display_name = getattr(args, "display_name", None) or args.deployment_id
     channel_type = getattr(args, "channel_type", None) or "API"
 
+    create_kwargs = {
+        "deployment_id": args.deployment_id,
+        "display_name": display_name,
+        "app_version": version_id,
+        "channel_type": channel_type,
+        "traffic_split": traffic_split,
+    }
+    if getattr(args, "persona_property", None):
+        create_kwargs["persona_property"] = args.persona_property
+    if getattr(args, "noise_suppression_level", None):
+        create_kwargs["noise_suppression_level"] = args.noise_suppression_level
+
     deployments_client = Deployments(app_name=args.app_name)
-    deployment = deployments_client.create_deployment(
-        deployment_id=args.deployment_id,
-        display_name=display_name,
-        app_version=version_id,
-        channel_type=channel_type,
-        traffic_split=traffic_split,
-    )
+    deployment = deployments_client.create_deployment(**create_kwargs)
     print(f"Deployment created successfully: {deployment.name}")
 
 
@@ -2514,6 +2520,16 @@ def get_parser() -> argparse.ArgumentParser:
             "version_id1:traffic_percentage1,version_id2:traffic_percentage2 "
             '(e.g. "v1:90,v2:10").'
         ),
+    )
+    parser_deps_create.add_argument(
+        "--persona-property",
+        required=False,
+        help="Persona property for channel profile (e.g. CONCISE, CHATTY).",
+    )
+    parser_deps_create.add_argument(
+        "--noise-suppression-level",
+        required=False,
+        help="Noise suppression level for channel profile (e.g. low).",
     )
     _add_project_location_args(parser_deps_create, required=False)
     parser_deps_create.set_defaults(func=deployments_create)
