@@ -465,3 +465,94 @@ def test_update_deployment_traffic_split_clear(
     assert dep.app_version == "projects/p/locations/l/apps/A/versions/v2"
     # The experiment_config should be empty
     assert len(dep.experiment_config.version_release.traffic_allocations) == 0
+
+
+def test_build_persona_property() -> None:
+    assert Deployments._build_persona_property(None) is None
+
+    p_concise = Deployments._build_persona_property("CONCISE")
+    assert (
+        p_concise.persona
+        == types.ChannelProfile.PersonaProperty.Persona.CONCISE
+    )
+
+    p_chatty = Deployments._build_persona_property("chatty")
+    assert (
+        p_chatty.persona == types.ChannelProfile.PersonaProperty.Persona.CHATTY
+    )
+
+    p_enum = Deployments._build_persona_property(Deployments.Persona.CONCISE)
+    assert (
+        p_enum.persona == types.ChannelProfile.PersonaProperty.Persona.CONCISE
+    )
+
+    p_proto = Deployments._build_persona_property(
+        types.ChannelProfile.PersonaProperty.Persona.CHATTY
+    )
+    assert (
+        p_proto.persona == types.ChannelProfile.PersonaProperty.Persona.CHATTY
+    )
+
+    msg = types.ChannelProfile.PersonaProperty(
+        persona=types.ChannelProfile.PersonaProperty.Persona.CONCISE
+    )
+    assert Deployments._build_persona_property(msg) is msg
+
+    with pytest.raises(ValueError, match="Invalid persona 'INVALID'"):
+        Deployments._build_persona_property("INVALID")
+
+    with pytest.raises(
+        ValueError, match="Unsupported type for persona_property"
+    ):
+        Deployments._build_persona_property([1, 2, 3])
+
+
+@patch("cxas_scrapi.core.apps.AgentServiceClient")
+def test_create_deployment_with_channel_settings(
+    mock_client_cls: typing.Any,
+) -> None:
+    mock_client = mock_client_cls.return_value
+    mock_client.create_deployment.return_value = MagicMock()
+
+    deps = Deployments("projects/p/locations/l/apps/A")
+    deps.create_deployment(
+        "dep_id",
+        "my_dep",
+        "v1",
+        channel_type="API",
+        persona_property=Deployments.Persona.CONCISE,
+        noise_suppression_level="low",
+    )
+
+    mock_client.create_deployment.assert_called_once()
+    dep = mock_client.create_deployment.call_args[1]["request"].deployment
+    assert (
+        dep.channel_profile.persona_property.persona
+        == types.ChannelProfile.PersonaProperty.Persona.CONCISE
+    )
+    assert dep.channel_profile.noise_suppression_level == "low"
+
+
+@patch("cxas_scrapi.core.apps.AgentServiceClient")
+def test_update_deployment_with_channel_settings(
+    mock_client_cls: typing.Any,
+) -> None:
+    mock_client = mock_client_cls.return_value
+    mock_client.update_deployment.return_value = MagicMock()
+
+    deps = Deployments("projects/p/locations/l/apps/A")
+    deps.update_deployment(
+        "dep_id",
+        persona_property="CONCISE",
+        noise_suppression_level="low",
+    )
+
+    mock_client.update_deployment.assert_called_once()
+    req = mock_client.update_deployment.call_args[1]["request"]
+    assert (
+        req.deployment.channel_profile.persona_property.persona
+        == types.ChannelProfile.PersonaProperty.Persona.CONCISE
+    )
+    assert req.deployment.channel_profile.noise_suppression_level == "low"
+    assert "channel_profile.persona_property" in req.update_mask.paths
+    assert "channel_profile.noise_suppression_level" in req.update_mask.paths
