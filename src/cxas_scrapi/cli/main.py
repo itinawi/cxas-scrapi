@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from cxas_scrapi.cli.llm_lint import llm_lint
     from cxas_scrapi.cli.versions_cli import (
         app_versions_compare,
+        app_versions_create,
         app_versions_list,
     )
     from cxas_scrapi.core.github import init_github_action
@@ -80,6 +81,9 @@ else:
     llm_lint = LazyCallable("cxas_scrapi.cli.llm_lint", "llm_lint")
     app_versions_list = LazyCallable(
         "cxas_scrapi.cli.versions_cli", "app_versions_list"
+    )
+    app_versions_create = LazyCallable(
+        "cxas_scrapi.cli.versions_cli", "app_versions_create"
     )
     app_versions_compare = LazyCallable(
         "cxas_scrapi.cli.versions_cli", "app_versions_compare"
@@ -666,6 +670,7 @@ def combined_evals_report_cmd(args: argparse.Namespace) -> None:
         capture_agent_audio=getattr(args, "capture_agent_audio", False),
         single_bidi_stream=getattr(args, "single_bidi_stream", False),
         report_format=getattr(args, "format", "html") or "html",
+        vertex_location=getattr(args, "vertex_location", "global") or "global",
     )
     print(f"Combined report generated at {actual_output_path}")
 
@@ -783,6 +788,11 @@ def ci_test(args: argparse.Namespace) -> None:
     from cxas_scrapi.core.apps import Apps
     from cxas_scrapi.core.evaluations import Evaluations
 
+    # Resolve cxas binary path relative to the current python interpreter
+    cxas_bin = os.path.join(os.path.dirname(sys.executable), "cxas")
+    if not os.path.isfile(cxas_bin) or not os.access(cxas_bin, os.X_OK):
+        cxas_bin = "cxas"  # Fallback to PATH
+
     print("Starting CI Test Lifecycle...")
 
     if hasattr(args, "display_name") and args.display_name:
@@ -813,7 +823,7 @@ def ci_test(args: argparse.Namespace) -> None:
         if os.path.exists(test_file):
             print(f"\\n--- Running Tool Tests on {temp_app_name} ---")
             cmd = [
-                "cxas",
+                cxas_bin,
                 "test-tools",
                 "--app-name",
                 temp_app_name,
@@ -842,7 +852,7 @@ def ci_test(args: argparse.Namespace) -> None:
             )
             for eval_id in all_eval_ids:
                 cmd = [
-                    "cxas",
+                    cxas_bin,
                     "run",
                     "--app-name",
                     temp_app_name,
@@ -1120,6 +1130,8 @@ def deployments_create(args: argparse.Namespace) -> None:
 
     display_name = getattr(args, "display_name", None) or args.deployment_id
     channel_type = getattr(args, "channel_type", None) or "API"
+    persona_property = getattr(args, "persona_property", None)
+    noise_suppression_level = getattr(args, "noise_suppression_level", None)
 
     deployments_client = Deployments(app_name=args.app_name)
     deployment = deployments_client.create_deployment(
@@ -1128,8 +1140,36 @@ def deployments_create(args: argparse.Namespace) -> None:
         app_version=version_id,
         channel_type=channel_type,
         traffic_split=traffic_split,
+        persona_property=persona_property,
+        noise_suppression_level=noise_suppression_level,
     )
     print(f"Deployment created successfully: {deployment.name}")
+
+
+def deployments_update(args: argparse.Namespace) -> None:
+    """Updates deployment configuration and channel settings."""
+    from cxas_scrapi.core.deployments import Deployments
+
+    kwargs = {}
+    if getattr(args, "display_name", None):
+        kwargs["display_name"] = args.display_name
+    version_id = getattr(args, "version", None) or getattr(
+        args, "version_id", None
+    )
+    if version_id:
+        kwargs["app_version"] = version_id
+    if getattr(args, "channel_type", None):
+        kwargs["channel_type"] = args.channel_type
+    if getattr(args, "persona_property", None):
+        kwargs["persona_property"] = args.persona_property
+    if getattr(args, "noise_suppression_level", None):
+        kwargs["noise_suppression_level"] = args.noise_suppression_level
+
+    deployments_client = Deployments(app_name=args.app_name)
+    deployment = deployments_client.update_deployment(
+        deployment_id=args.deployment_id, **kwargs
+    )
+    print(f"Deployment updated successfully: {deployment.name}")
 
 
 def deployments_promote(args: argparse.Namespace) -> None:
@@ -1853,6 +1893,11 @@ def get_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep one persistent bidi WebSocket open per audio simulation instead of one connection per turn.",
     )
+    parser_report.add_argument(
+        "--vertex-location",
+        default="global",
+        help="Vertex AI location for evaluation LLM models. Defaults to 'global'.",
+    )
     parser_report.set_defaults(func=combined_evals_report_cmd)
 
     parser_test_tools = subparsers.add_parser(
@@ -2171,6 +2216,16 @@ def get_parser() -> argparse.ArgumentParser:
         "--target-dir", default=".", help="Directory to extract to."
     )
     parser_pull.add_argument(
+        "--version-id",
+        default=None,
+        help=(
+            "Optional. Export a specific app version instead of the live app. "
+            "Can be a version display name (e.g., 'v1.0'), a bare version ID "
+            "(e.g., '001'), or a full resource name "
+            "(e.g., 'projects/.../locations/.../apps/.../versions/001')."
+        ),
+    )
+    parser_pull.add_argument(
         "--overwrite",
         action="store_true",
         help=(
@@ -2453,7 +2508,8 @@ def get_parser() -> argparse.ArgumentParser:
 
     # Subparsers for 'deployments'
     parser_deps = subparsers.add_parser(
-        "deployments", help="Manage deployments (list, create, promote)."
+        "deployments",
+        help="Manage deployments (list, create, update, promote).",
     )
     deps_subparsers = parser_deps.add_subparsers(
         title="Deployments Commands",
@@ -2515,8 +2571,72 @@ def get_parser() -> argparse.ArgumentParser:
             '(e.g. "v1:90,v2:10").'
         ),
     )
+    parser_deps_create.add_argument(
+        "--persona-property",
+        required=False,
+        type=str.upper,
+        choices=["CONCISE", "CHATTY"],
+        help="Persona property for channel profile (e.g. CONCISE, CHATTY).",
+    )
+    parser_deps_create.add_argument(
+        "--noise-suppression-level",
+        required=False,
+        type=str.lower,
+        choices=["low", "moderate", "high", "very_high"],
+        help="Noise suppression level for channel profile (e.g. low).",
+    )
     _add_project_location_args(parser_deps_create, required=False)
     parser_deps_create.set_defaults(func=deployments_create)
+
+    parser_deps_update = deps_subparsers.add_parser(
+        "update", help="Update deployment configuration and channel settings."
+    )
+    parser_deps_update.add_argument(
+        "--app-name",
+        required=True,
+        help="The CXAS App ID (projects/.../locations/.../apps/...).",
+    )
+    parser_deps_update.add_argument(
+        "--deployment-id",
+        required=True,
+        help="Deployment ID for update_deployment.",
+    )
+    parser_deps_update.add_argument(
+        "--version-id",
+        required=False,
+        help="Version ID for update_deployment.",
+    )
+    parser_deps_update.add_argument(
+        "--version",
+        required=False,
+        help="Version ID for update_deployment.",
+    )
+    parser_deps_update.add_argument(
+        "--display-name",
+        required=False,
+        help="Display name for the deployment.",
+    )
+    parser_deps_update.add_argument(
+        "--channel-type",
+        required=False,
+        help="Channel type (e.g. API).",
+    )
+    parser_deps_update.add_argument(
+        "--persona-property",
+        required=False,
+        type=str.upper,
+        choices=["CONCISE", "CHATTY"],
+        help="Persona property for channel profile (e.g. CONCISE, CHATTY).",
+    )
+    parser_deps_update.add_argument(
+        "--noise-suppression-level",
+        required=False,
+        type=str.lower,
+        choices=["low", "moderate", "high", "very_high"],
+        help="Noise suppression level for channel profile (e.g. low).",
+    )
+    _add_project_location_args(parser_deps_update, required=False)
+    parser_deps_update.set_defaults(func=deployments_update)
 
     parser_deps_promote = deps_subparsers.add_parser(
         "promote", help="Promote app to live traffic."
@@ -2629,7 +2749,7 @@ def get_parser() -> argparse.ArgumentParser:
 
     # Subparsers for 'versions'
     parser_versions = subparsers.add_parser(
-        "versions", help="Manage CXAS app versions (list, compare)."
+        "versions", help="Manage CXAS app versions (list, create, compare)."
     )
     versions_subparsers = parser_versions.add_subparsers(
         title="Versions Commands", dest="versions_command", required=True
@@ -2645,6 +2765,33 @@ def get_parser() -> argparse.ArgumentParser:
     )
     _add_project_location_args(parser_versions_list, required=False)
     parser_versions_list.set_defaults(func=app_versions_list)
+
+    parser_versions_create = versions_subparsers.add_parser(
+        "create", help="Create a new version snapshot of an app."
+    )
+    parser_versions_create.add_argument(
+        "--app-name",
+        required=True,
+        help="The CXAS App ID (projects/.../locations/.../apps/...).",
+    )
+    parser_versions_create.add_argument(
+        "--display-name",
+        "-n",
+        help="Display name for the version (default: auto-generated timestamp).",
+    )
+    parser_versions_create.add_argument(
+        "--description",
+        "-d",
+        default="",
+        help="Description for the version.",
+    )
+    parser_versions_create.add_argument(
+        "--json",
+        action="store_true",
+        help="Output result as JSON.",
+    )
+    _add_project_location_args(parser_versions_create, required=False)
+    parser_versions_create.set_defaults(func=app_versions_create)
 
     parser_versions_compare = versions_subparsers.add_parser(
         "compare",
